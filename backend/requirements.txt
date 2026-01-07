@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+anthropic
+chromadb
+requests
+python-dotenv
+PyGithub
+pydantic
+setuptools
+sentence-transformers
+torch
+transformers

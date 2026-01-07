@@ -1,0 +1,195 @@
+name: DevopsaiassistantBuildAndPushCI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'Pipfile'
+      - 'api/**'
+      - 'backend/**'
+      - 'client/**'
+      - 'docker-compose.yml'
+      - 'docker/Dockerfile.backend'
+      - 'docker/Dockerfile.frontend'
+      - 'frontend/**'
+      - 'helm/**'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'poetry.lock'
+      - 'requirements.txt'
+      - 'yarn.lock'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION_DEV }}
+  ECR_REPOSITORY_PREFIX: maconomy/devopsaiassistant
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: ${{ secrets.ECR_REGISTRY_DEV }}
+      AWS_REGION: ${{ secrets.AWS_REGION_DEV }}
+    outputs:
+      image_tags: ${{ steps.push.outputs.image_tags }}
+      latest_tags: ${{ steps.push.outputs.latest_tags }}
+      branch_name: ${{ steps.branch.outputs.branch_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract branch name
+        id: branch
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            BRANCH_NAME="main"
+          elif [[ "${GITHUB_REF}" == "refs/heads/develop" ]]; then
+            BRANCH_NAME="dev"
+          else
+            BRANCH_NAME=$(echo "${GITHUB_REF#refs/heads/}" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]')
+          fi
+          echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Branch detected: ${BRANCH_NAME}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: ${{ secrets.AWS_REGION_DEV }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Docker images
+        id: push
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY_DEV }}
+          ECR_REPOSITORY_PREFIX: ${{ env.ECR_REPOSITORY_PREFIX }}
+        run: |
+          set -euo pipefail
+
+          COMMIT_SHA="${GITHUB_SHA}"
+          BRANCH_NAME="${{ steps.branch.outputs.branch_name }}"
+
+          SERVICES=(
+            "backend"
+            "frontend"
+          )
+
+          SUMMARY_FILE="build-summary.md"
+          {
+            echo "## Docker Build Summary"
+            echo
+            echo "| Service | Repository | Image Tag | Latest Tag | Image URI | Latest URI |"
+            echo "|---------|------------|-----------|------------|-----------|------------|"
+          } > "$SUMMARY_FILE"
+
+          IMAGE_TAGS=()
+          LATEST_TAGS=()
+
+          for SERVICE in "${SERVICES[@]}"; do
+            DOCKERFILE="docker/Dockerfile.${SERVICE}"
+            if [[ ! -f "$DOCKERFILE" ]]; then
+              echo "Skipping ${SERVICE}: missing ${DOCKERFILE}" | tee -a "$SUMMARY_FILE"
+              continue
+            fi
+
+            SERVICE_KEY=$(echo "$SERVICE" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
+            REPOSITORY="${ECR_REPOSITORY_PREFIX}/${SERVICE}"
+
+            case "$BRANCH_NAME" in
+              main)
+                LATEST_TAG="devopsaiassistant-${SERVICE_KEY}-prod-latest"
+                ;;
+              dev)
+                LATEST_TAG="devopsaiassistant-${SERVICE_KEY}-dev-latest"
+                ;;
+              *)
+                LATEST_TAG="devopsaiassistant-${SERVICE_KEY}-${BRANCH_NAME}-latest"
+                ;;
+            esac
+
+            TAG="$COMMIT_SHA"
+            IMAGE_URI="${ECR_REGISTRY}/${REPOSITORY}:${TAG}"
+            LATEST_URI="${ECR_REGISTRY}/${REPOSITORY}:${LATEST_TAG}"
+            DISPLAY_TAG="${REPOSITORY}:${TAG}"
+            DISPLAY_LATEST_TAG="${REPOSITORY}:${LATEST_TAG}"
+
+            echo "Building ${SERVICE} image using ${DOCKERFILE}: ${IMAGE_URI}"
+            docker build -f "$DOCKERFILE" -t "$IMAGE_URI" .
+
+            echo "Pushing ${IMAGE_URI}"
+            docker push "$IMAGE_URI"
+
+            echo "Tagging ${IMAGE_URI} as ${LATEST_URI}"
+            docker tag "$IMAGE_URI" "$LATEST_URI"
+            docker push "$LATEST_URI"
+
+            IMAGE_TAGS+=("$DISPLAY_TAG")
+            LATEST_TAGS+=("$DISPLAY_LATEST_TAG")
+
+            echo "| ${SERVICE} | ${REPOSITORY} | \`${DISPLAY_TAG}\` | \`${DISPLAY_LATEST_TAG}\` | \`${IMAGE_URI}\` | \`${LATEST_URI}\` |" >> "$SUMMARY_FILE"
+          done
+
+          if [[ ${#IMAGE_TAGS[@]} -eq 0 ]]; then
+            echo "| _none_ | n/a | n/a | n/a | n/a | n/a |" >> "$SUMMARY_FILE"
+          fi
+
+          if [[ ${#IMAGE_TAGS[@]} -gt 0 ]]; then
+            ( IFS=','; echo "image_tags=${IMAGE_TAGS[*]}" >> "$GITHUB_OUTPUT" )
+            ( IFS=','; echo "latest_tags=${LATEST_TAGS[*]}" >> "$GITHUB_OUTPUT" )
+          else
+            echo "image_tags=" >> "$GITHUB_OUTPUT"
+            echo "latest_tags=" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "summary_file=${SUMMARY_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Summary
+        shell: bash
+        run: |
+          {
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Branch** | ${{ steps.branch.outputs.branch_name }} |"
+            echo "| **Commit SHA** | ${{ github.sha }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -n "${{ steps.push.outputs.summary_file }}" && -f "${{ steps.push.outputs.summary_file }}" ]]; then
+            cat "${{ steps.push.outputs.summary_file }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  notify-completion:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: always()
+    steps:
+      - name: Notify Build Status
+        shell: bash
+        run: |
+          if [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
+            echo "Docker image build completed successfully!"
+            if [[ -n "${{ needs.build-and-push.outputs.image_tags }}" ]]; then
+              echo "Tags:"
+              echo "${{ needs.build-and-push.outputs.image_tags }}" | tr ',' '\n'
+            fi
+            if [[ -n "${{ needs.build-and-push.outputs.latest_tags }}" ]]; then
+              echo "Latest Tags:"
+              echo "${{ needs.build-and-push.outputs.latest_tags }}" | tr ',' '\n'
+            fi
+            echo "Full image URIs are available in the build summary above."
+          else
+            echo "Docker image build failed!"
+            exit 1
+          fi

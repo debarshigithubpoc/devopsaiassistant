@@ -1,0 +1,48 @@
+global:
+  imagePullPolicy: IfNotPresent
+replicaCount: 1
+backend:
+  image:
+    repository: devopsaiassistant-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+frontend:
+  image:
+    repository: devopsaiassistant-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: LoadBalancer
+    port: 3000
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+secrets:
+  apiKey: your-api-key-here
+configmap:
+  environment: production
+ingress:
+  enabled: false
+  className: ''
+  annotations:
+    kubernetes.io/ingress.class: nginx
+  hosts:
+  - host: devopsaiassistant.local
+    paths:
+    - path: /
+      pathType: Prefix
+  tls: []

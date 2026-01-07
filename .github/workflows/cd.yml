@@ -1,0 +1,102 @@
+name: DevopsaiassistantDeploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Target Kubernetes namespace"
+        required: true
+        default: "devopsaiassistant-dev"
+        type: string
+      environment:
+        description: "Deployment environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      image_tag:
+        description: "Docker image tag produced by the CI workflow"
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION_DEV }}
+  CLUSTER_NAME: devopsaiassistant-eks-cluster
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY_DEV }}
+  CHART_PATH: ./helm/devopsaiassistant
+  VALUES_FILE: ./helm/devopsaiassistant/values.yaml
+  ECR_REPOSITORY_PREFIX: maconomy/devopsaiassistant
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.application_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: ${{ secrets.AWS_REGION_DEV }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "${{ secrets.AWS_REGION_DEV }}" \
+            --name "${{ env.CLUSTER_NAME }}"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 3.14.0
+
+      - name: Deploy with Helm
+        id: deploy
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          DEPLOY_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # Deploy using Helm - KubeWise style
+          helm upgrade --install devopsaiassistant "${{ env.CHART_PATH }}" \
+            --namespace "${{ inputs.namespace }}" \
+            --create-namespace \
+            -f "${{ env.VALUES_FILE }}" \
+            --set "global.imageRegistry=${{ secrets.ECR_REGISTRY_DEV }}" \
+            --set "frontend.image.tag=${{ env.IMAGE_TAG }}" \
+            --wait --timeout=10m
+
+          # Get application URL if available
+          SERVICE_URL=$(kubectl get service devopsaiassistant -n "${{ inputs.namespace }}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          if [[ -n "$SERVICE_URL" ]]; then
+            echo "application_url=http://${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## Devopsaiassistant Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Namespace | ${{ inputs.namespace }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | ${{ inputs.environment }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | ${{ inputs.image_tag }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Helm Release | devopsaiassistant |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cluster | ${{ env.CLUSTER_NAME }} |" >> "$GITHUB_STEP_SUMMARY"
